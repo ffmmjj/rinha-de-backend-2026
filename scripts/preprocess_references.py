@@ -2,27 +2,24 @@
 """
 Pre-process references.json.gz into an 8-bit quantized binary format.
 
+Streams the JSON file using ijson to keep memory usage low.
+If ijson is not available, falls back to a simple bracket-counting parser.
+
 Input:  resources/references.json.gz  (~48 MB gzipped, ~280 MB JSON)
-Output: resources/references.bin       (~45 MB binary)
+Output: resources/references.bin       (~43 MB binary)
 
 Binary layout (little-endian):
-  [0..7]       uint64_t  N  (number of entries, 3_000_000)
-  [8..63]      float[14] dim_mins    (per-dimension minimum values)
-  [64..119]    float[14] dim_ranges  (per-dimension max - min)
-  [120..]      repeated entries:
-                 [0..13]   uint8_t[14]  quantized vector
-                 [14]      uint8_t      label (0 = legit, 1 = fraud)
-
-Decoding (in C):
-    recovered = quantized / 255.0 * range + min
+  [0..7]       uint64_t  N
+  [8..63]      float[14] dim_mins
+  [64..119]    float[14] dim_ranges
+  [120..]      struct reference[N]  (each: uint8_t[14] + uint8_t label)
 """
 
 import gzip
 import json
 import struct
-import sys
 import os
-import numpy as np
+import sys
 
 SRC = os.path.join(os.path.dirname(__file__), "..", "resources", "references.json.gz")
 DST = os.path.join(os.path.dirname(__file__), "..", "resources", "references.bin")
@@ -30,53 +27,129 @@ DST = os.path.join(os.path.dirname(__file__), "..", "resources", "references.bin
 VECTOR_LEN = 14
 QMAX = 255.0
 
-def main():
-    print(f"Reading {SRC} ...")
-    with gzip.open(SRC, "rt", encoding="utf-8") as f:
-        data = json.load(f)
+try:
+    import ijson
+    HAVE_IJSON = True
+except ImportError:
+    HAVE_IJSON = False
 
-    n = len(data)
-    print(f"Entries: {n}")
 
-    # Extract vectors as numpy array for easy min/max computation
-    vectors = np.array([entry["vector"] for entry in data], dtype=np.float64)
-    labels = np.array([1 if entry["label"] == "fraud" else 0 for entry in data], dtype=np.uint8)
+def iter_entries_ijson(f):
+    """Stream entries using ijson."""
+    for obj in ijson.items(f, "item"):
+        yield obj["vector"], 1 if obj["label"] == "fraud" else 0
 
-    # Per-dimension min and range
-    dim_mins = np.min(vectors, axis=0).astype(np.float32)
-    dim_maxs = np.max(vectors, axis=0).astype(np.float32)
-    dim_ranges = dim_maxs - dim_mins
-    dim_ranges[dim_ranges == 0] = 1.0  # avoid division by zero
 
-    print(f"Dim mins:  {list(dim_mins)}")
-    print(f"Dim maxs:  {list(dim_maxs)}")
+def iter_entries_manual(f):
+    """Simple streaming parser that counts braces to find object boundaries."""
+    decoder = json.JSONDecoder()
+    # We'll read the file in helper_text_chunks
+    buf = ""
+    # Skip initial whitespace and '['
+    while True:
+        ch = f.read(1)
+        if not ch:
+            return
+        if ch == '[':
+            break
 
-    # Quantize
-    quantized = np.round((vectors - dim_mins) / dim_ranges * QMAX).astype(np.uint8)
+    depth = 0
+    obj_start = None
+    while True:
+        ch = f.read(1)
+        if not ch:
+            break
+        if ch == '{':
+            if depth == 0:
+                obj_start = len(buf)
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0 and obj_start is not None:
+                # We have a complete object in the buffer
+                obj_str = buf[obj_start:] + '}'
+                buf = ""
+                obj_start = None
+                try:
+                    obj = decoder.decode(obj_str)
+                    yield obj["vector"], 1 if obj["label"] == "fraud" else 0
+                except json.JSONDecodeError:
+                    pass
+                continue
+        if depth > 0 or ch not in ' \t\n\r,':
+            buf += ch
 
-    print(f"Writing {DST} ...")
+
+def stream_entries():
+    """Yield (vector, label) tuples from the JSON file."""
+    f = gzip.open(SRC, "rt", encoding="utf-8")
+    try:
+        if HAVE_IJSON:
+            yield from iter_entries_ijson(f)
+        else:
+            yield from iter_entries_manual(f)
+    finally:
+        f.close()
+
+
+def first_pass():
+    """Read the JSON, compute per-dimension min/max and count."""
+    print("First pass: computing min/max ...")
+    mins = [float('inf')] * VECTOR_LEN
+    maxs = [float('-inf')] * VECTOR_LEN
+    count = 0
+
+    for vec, _ in stream_entries():
+        for i, v in enumerate(vec):
+            if v < mins[i]:
+                mins[i] = v
+            if v > maxs[i]:
+                maxs[i] = v
+        count += 1
+        if count % 500_000 == 0:
+            print(f"  scanned {count}")
+
+    if count == 0:
+        print("ERROR: no entries found!")
+        sys.exit(1)
+
+    print(f"  total: {count}")
+    print(f"  mins:  {[round(m, 4) for m in mins]}")
+    print(f"  maxs:  {[round(m, 4) for m in maxs]}")
+    return count, mins, maxs
+
+
+def second_pass(count, mins, maxs):
+    """Second pass: quantize and write binary."""
+    ranges = [maxs[i] - mins[i] if maxs[i] != mins[i] else 1.0
+              for i in range(VECTOR_LEN)]
+
+    print(f"\nSecond pass: quantizing and writing ...")
+    print(f"  ranges: {[round(r, 4) for r in ranges]}")
+
     with open(DST, "wb") as out:
-        # Header: count
-        out.write(struct.pack("<Q", n))
-        # Per-dimension mins and ranges
-        out.write(struct.pack("<14f", *dim_mins))
-        out.write(struct.pack("<14f", *dim_ranges))
+        # Header
+        out.write(struct.pack("<Q", count))
+        out.write(struct.pack("<14f", *mins))
+        out.write(struct.pack("<14f", *ranges))
+
         # Entries
-        for i in range(n):
-            out.write(struct.pack("<14BB", *quantized[i], labels[i]))
-            if (i + 1) % 500_000 == 0:
-                print(f"  {i+1}/{n}")
+        written = 0
+        for vec, label in stream_entries():
+            qvec = [round((v - mins[i]) / ranges[i] * QMAX) for i, v in enumerate(vec)]
+            qvec = [max(0, min(255, q)) for q in qvec]
+            out.write(struct.pack("<14BB", *qvec, label))
+            written += 1
+            if written % 500_000 == 0:
+                print(f"  wrote {written}")
 
     size_mb = os.path.getsize(DST) / (1024 * 1024)
-    print(f"Done. {DST}  ({size_mb:.1f} MB)")
+    print(f"\nDone. {DST}  ({size_mb:.1f} MB)")
 
-    # Quick error estimate
-    recovered = quantized.astype(np.float64) / QMAX * dim_ranges + dim_mins
-    abs_err = np.abs(vectors - recovered)
-    print(f"\nQuantization error (8-bit):")
-    print(f"  MAE:  {abs_err.mean():.6f}")
-    print(f"  RMSE: {np.sqrt((abs_err**2).mean()):.6f}")
-    print(f"  Max:  {abs_err.max():.6f}")
+
+def main():
+    count, mins, maxs = first_pass()
+    second_pass(count, mins, maxs)
 
 
 if __name__ == "__main__":

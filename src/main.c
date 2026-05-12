@@ -4,7 +4,7 @@
 
 #include "server.h"
 
-#define PORT 8081
+#define PORT 9999
 #define WORKER_COUNT 4
 
 #define DATASET_PATH "resources/references.bin"
