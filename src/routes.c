@@ -1,5 +1,6 @@
 #include "routes.h"
 #include "transaction.h"
+#include "fraud.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -68,10 +69,19 @@ enum MHD_Result handle_fraud_score(struct MHD_Connection *connection,
         fprintf(stderr, "  last_transaction: null\n");
     }
 
+    bool is_fraud = fraud_detect(&tx);
+
+    fprintf(stderr, "  fraud: %s\n", is_fraud ? "YES" : "NO");
+
     transaction_free(&tx);
 
-    return respond_json(connection, MHD_HTTP_OK,
-                         "{\"approved\":false,\"fraud_score\":1.0}");
+    if (is_fraud) {
+        return respond_json(connection, MHD_HTTP_OK,
+                             "{\"approved\":false,\"fraud_score\":1.0}");
+    } else {
+        return respond_json(connection, MHD_HTTP_OK,
+                             "{\"approved\":true,\"fraud_score\":0.0}");
+    }
 }
 
 enum MHD_Result handle_not_found(struct MHD_Connection *connection) {
