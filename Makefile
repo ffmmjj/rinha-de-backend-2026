@@ -1,4 +1,4 @@
-.PHONY: build run run-bg stop test clean docker-build docker-run docker-stop docker-test
+.PHONY: build run run-bg stop test clean data docker-build docker-run docker-stop docker-test
 
 BUILD_DIR ?= cmake-build-debug
 CMAKE     ?= /Users/felipe/Applications/CLion.app/Contents/bin/cmake/mac/aarch64/bin/cmake
@@ -30,6 +30,9 @@ test: build
 	curl -s http://localhost:8081/ || true
 	@echo ""
 	$(MAKE) stop
+
+data:
+	python3 scripts/preprocess_references.py
 
 clean:
 	rm -rf $(BUILD_DIR)
