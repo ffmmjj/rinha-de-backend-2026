@@ -19,6 +19,38 @@ const struct norm_constants g_norm = {
 };
 
 /* ──────────────────────────────────────────────
+ * MCC risk lookup table
+ * ────────────────────────────────────────────── */
+
+struct mcc_entry {
+    const char *mcc;
+    float risk;
+};
+
+static const struct mcc_entry mcc_risk_table[] = {
+    {"5411", 0.15f},
+    {"5812", 0.30f},
+    {"5912", 0.20f},
+    {"5944", 0.45f},
+    {"7801", 0.80f},
+    {"7802", 0.75f},
+    {"7995", 0.85f},
+    {"4511", 0.35f},
+    {"5311", 0.25f},
+    {"5999", 0.50f},
+};
+
+#define MCC_RISK_COUNT (sizeof(mcc_risk_table) / sizeof(mcc_risk_table[0]))
+
+static float lookup_mcc_risk(const char *mcc) {
+    for (size_t i = 0; i < MCC_RISK_COUNT; i++) {
+        if (strcmp(mcc, mcc_risk_table[i].mcc) == 0)
+            return mcc_risk_table[i].risk;
+    }
+    return 0.5f; /* default */
+}
+
+/* ──────────────────────────────────────────────
  * Helpers
  * ────────────────────────────────────────────── */
 
@@ -150,8 +182,8 @@ void features_extract(const struct transaction *tx, float out[VECTOR_LEN]) {
     /* 11: unknown_merchant (1 = unknown) */
     out[11] = is_known_merchant(tx) ? 0.0f : 1.0f;
 
-    /* 12: mcc_risk — hardcoded default 0.5 for now */
-    out[12] = 0.5f;
+    /* 12: mcc_risk */
+    out[12] = lookup_mcc_risk(tx->merchant.mcc);
 
     /* 13: merchant_avg_amount */
     out[13] = (float)limit(tx->merchant.avg_amount / g_norm.max_merchant_avg_amount);
