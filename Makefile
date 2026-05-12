@@ -17,7 +17,8 @@ run-bg:
 stop:
 	pkill -f rinha_de_backend 2>/dev/null; true
 
-test: build data
+test: build
+	@test -f resources/references.bin || $(MAKE) data
 	$(MAKE) stop
 	$(MAKE) run-bg
 	sleep 0.5

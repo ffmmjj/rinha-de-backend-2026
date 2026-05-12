@@ -1,6 +1,7 @@
 #include "routes.h"
 #include "transaction.h"
 #include "fraud.h"
+#include "features.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -68,6 +69,15 @@ enum MHD_Result handle_fraud_score(struct MHD_Connection *connection,
     } else {
         fprintf(stderr, "  last_transaction: null\n");
     }
+
+    float vec[VECTOR_LEN];
+    features_extract(&tx, vec);
+
+    fprintf(stderr, "  feature_vector:");
+    for (size_t i = 0; i < VECTOR_LEN; i++) {
+        fprintf(stderr, " %.4f", vec[i]);
+    }
+    fprintf(stderr, "\n");
 
     bool is_fraud = fraud_detect(&tx);
 
