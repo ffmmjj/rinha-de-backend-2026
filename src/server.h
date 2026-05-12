@@ -2,6 +2,13 @@
 #define SERVER_H
 
 #include <microhttpd.h>
+#include "dataset.h"
+
+/* ──────────────────────────────────────────────
+ * Dataset — global, populated on startup
+ * ────────────────────────────────────────────── */
+
+extern struct dataset g_dataset;
 
 /* ──────────────────────────────────────────────
  * Server lifecycle

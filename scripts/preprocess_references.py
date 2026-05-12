@@ -45,11 +45,8 @@ def main():
                 print(f"ERROR: entry {i} has vector length {len(vec)}, expected {VECTOR_LEN}")
                 sys.exit(1)
 
-            # float vector (14 × 4 = 56 bytes)
-            out.write(struct.pack("<14f", *vec))
-
-            # label: 0 = legit, 1 = fraud
-            out.write(struct.pack("<B", 1 if label == "fraud" else 0))
+            # float vector (14 × 4 = 56 bytes) + label (1 byte) + padding (3 bytes)
+            out.write(struct.pack("<14fBxxx", *vec, 1 if label == "fraud" else 0))
 
             if (i + 1) % 500_000 == 0:
                 print(f"  {i+1}/{n}")

@@ -5,6 +5,12 @@
 #include <string.h>
 
 /* ──────────────────────────────────────────────
+ * Global dataset definition
+ * ────────────────────────────────────────────── */
+
+struct dataset g_dataset;
+
+/* ──────────────────────────────────────────────
  * Iteration tracking for POST body accumulation
  * ────────────────────────────────────────────── */
 
