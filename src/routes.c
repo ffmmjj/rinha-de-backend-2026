@@ -79,7 +79,7 @@ enum MHD_Result handle_fraud_score(struct MHD_Connection *connection,
     }
     fprintf(stderr, "\n");
 
-    bool is_fraud = fraud_detect(&tx);
+    bool is_fraud = fraud_detect(vec);
 
     fprintf(stderr, "  fraud: %s\n", is_fraud ? "YES" : "NO");
 
