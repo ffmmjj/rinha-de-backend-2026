@@ -56,6 +56,24 @@ struct dataset {
     size_t _mem_len; /* size of mapped region */
 };
 
+/* Quantize a float vector using the dataset's params.
+   Dimensions with -1 are left as 0 (skipped in similarity). */
+static inline void quantize_query(const struct dataset *ds,
+                                   const float *vec,
+                                   uint8_t *qvec) {
+    for (size_t i = 0; i < VECTOR_LEN; i++) {
+        if (vec[i] == -1.0f) {
+            qvec[i] = 0;
+        } else {
+            float clamped = vec[i];
+            if (clamped < 0.0f) clamped = 0.0f;
+            if (clamped > 1.0f) clamped = 1.0f;
+            qvec[i] = (uint8_t)(clamped / ds->params.ranges[i] * 255.0f
+                                + 0.5f);
+        }
+    }
+}
+
 /* Load references.bin into memory. Returns 0 on success. */
 int dataset_load(const char *path, struct dataset *ds);
 

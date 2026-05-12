@@ -5,45 +5,39 @@
 #include <float.h>
 
 /* ──────────────────────────────────────────────
- * Cosine similarity between two raw (non-quantized)
- * float vectors. Output is in [-1, 1].
+ * Cosine similarity between a float query vector
+ * and a quantized uint8 reference vector.
  *
- * For vectors with -1 sentinel values (missing data),
- * we handle by zeroing the contribution from both vectors
- * when either has -1 — this avoids penalizing missing data.
+ * The query vector may contain -1 sentinels for
+ * dimensions with missing data — those dimensions
+ * are skipped entirely in the computation.
+ *
+ * The reference vector is valid quantized data
+ * (never has -1 sentinels).
  * ────────────────────────────────────────────── */
 
-static float cosine_similarity(const float *a, const float *b) {
-    float dot = 0.0f, na = 0.0f, nb = 0.0f;
+static float cosine_similarity_quantized(const float *query,
+                                          const uint8_t *ref,
+                                          const struct quant_params *params) {
+    float dot = 0.0f, nq = 0.0f, nr = 0.0f;
 
     for (int i = 0; i < VECTOR_LEN; i++) {
-        /* Skip dimensions where either vector has -1 (missing data) */
-        if (a[i] == -1.0f || b[i] == -1.0f)
+        /* Skip dimensions with missing data in the query */
+        if (query[i] == -1.0f)
             continue;
 
-        dot += a[i] * b[i];
-        na += a[i] * a[i];
-        nb += b[i] * b[i];
+        /* Decode reference dimension on the fly */
+        float rv = qdecode(ref[i], params->mins[i], params->ranges[i]);
+
+        dot += query[i] * rv;
+        nq += query[i] * query[i];
+        nr += rv * rv;
     }
 
-    if (na == 0.0f || nb == 0.0f)
+    if (nq == 0.0f || nr == 0.0f)
         return 0.0f;
 
-    return dot / (sqrtf(na) * sqrtf(nb));
-}
-
-/* ──────────────────────────────────────────────
- * Decode a quantized reference entry into a
- * float vector using the dataset's params.
- * ────────────────────────────────────────────── */
-
-static void decode_reference(const struct dataset *ds, size_t idx, float *out) {
-    const struct reference *ref = &ds->entries[idx];
-    for (int i = 0; i < VECTOR_LEN; i++) {
-        out[i] = qdecode(ref->qvector[i],
-                          ds->params.mins[i],
-                          ds->params.ranges[i]);
-    }
+    return dot / (sqrtf(nq) * sqrtf(nr));
 }
 
 /* ──────────────────────────────────────────────
@@ -59,7 +53,7 @@ bool fraud_detect(const float vec[14]) {
     }
 
     /*
-     * We keep a small array of the 5 best (similarity, index) pairs.
+     * Keep a small array of the 5 best (similarity, index) pairs.
      * Initially filled with -inf similarity.
      */
     float best_sim[KNN_K];
@@ -70,17 +64,14 @@ bool fraud_detect(const float vec[14]) {
         best_idx[i] = 0;
     }
 
-    /* Decode buffer for each reference (reused) */
-    float ref_vec[VECTOR_LEN];
-
     /* Scan all entries */
     for (size_t i = 0; i < g_dataset.count; i++) {
-        decode_reference(&g_dataset, i, ref_vec);
-        float sim = cosine_similarity(vec, ref_vec);
+        float sim = cosine_similarity_quantized(vec,
+                                                 g_dataset.entries[i].qvector,
+                                                 &g_dataset.params);
 
         /* Insert into top-5 if better than the worst so far */
         if (sim > best_sim[KNN_K - 1]) {
-            /* Find insertion point */
             int pos = KNN_K - 1;
             while (pos > 0 && sim > best_sim[pos - 1]) {
                 best_sim[pos] = best_sim[pos - 1];
