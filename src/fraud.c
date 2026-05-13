@@ -11,35 +11,19 @@
  * The query vector may contain -1 sentinels for
  * dimensions with missing data — those dimensions
  * are skipped entirely in the computation.
- *
- * The reference vector is valid quantized data
- * (never has -1 sentinels).
- *
- * The query norm is passed in to avoid recomputing
- * it for every comparison.
  * ────────────────────────────────────────────── */
 
-static float cosine_similarity_quantized(const float *query, float query_norm,
-                                          const uint8_t *ref,
-                                          const struct quant_params *params) {
-    float dot = 0.0f, nr = 0.0f;
+static inline float dot_quantized(const float *query, const uint8_t *ref,
+                                   const struct quant_params *params) {
+    float dot = 0.0f;
 
     for (int i = 0; i < VECTOR_LEN; i++) {
-        /* Skip dimensions with missing data in the query */
         if (query[i] == -1.0f)
             continue;
-
-        /* Decode reference dimension on the fly */
-        float rv = qdecode(ref[i], params->mins[i], params->ranges[i]);
-
-        dot += query[i] * rv;
-        nr += rv * rv;
+        dot += query[i] * qdecode(ref[i], params->mins[i], params->ranges[i]);
     }
 
-    if (query_norm == 0.0f || nr == 0.0f)
-        return 0.0f;
-
-    return dot / (query_norm * sqrtf(nr));
+    return dot;
 }
 
 /* ──────────────────────────────────────────────
@@ -75,11 +59,11 @@ bool fraud_detect(const float vec[14]) {
     }
     query_norm = query_norm > 0.0f ? sqrtf(query_norm) : 1.0f;
 
-    /* Scan all entries */
+    /* Scan all entries — reference norms are pre-computed */
     for (size_t i = 0; i < g_dataset.count; i++) {
-        float sim = cosine_similarity_quantized(vec, query_norm,
-                                                 g_dataset.entries[i].qvector,
-                                                 &g_dataset.params);
+        float dot = dot_quantized(vec, g_dataset.entries[i].qvector,
+                                   &g_dataset.params);
+        float sim = dot / (query_norm * g_dataset.ref_norms[i]);
 
         /* Insert into top-5 if better than the worst so far */
         if (sim > best_sim[KNN_K - 1]) {

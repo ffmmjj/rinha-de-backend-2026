@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/mman.h>
@@ -75,8 +76,28 @@ int dataset_load(const char *path, struct dataset *ds) {
     ds->_mem = base;
     ds->_mem_len = file_size;
 
-    fprintf(stderr, "Loaded %zu references from %s (%.1f MB, 8-bit quantized)\n",
-            ds->count, path, file_size / (1024.0 * 1024.0));
+    /* ── Pre-compute reference norms ── */
+    ds->ref_norms = malloc(ds->count * sizeof(float));
+    if (ds->ref_norms == NULL) {
+        perror("dataset_load: malloc ref_norms");
+        munmap(base, file_size);
+        return -1;
+    }
+
+    for (size_t i = 0; i < ds->count; i++) {
+        float sum = 0.0f;
+        for (int d = 0; d < VECTOR_LEN; d++) {
+            float v = qdecode(ds->entries[i].qvector[d],
+                               ds->params.mins[d],
+                               ds->params.ranges[d]);
+            sum += v * v;
+        }
+        ds->ref_norms[i] = sum > 0.0f ? sqrtf(sum) : 1.0f;
+    }
+
+    fprintf(stderr, "Loaded %zu references from %s (%.1f MB, 8-bit quantized; %.1f MB norms)\n",
+            ds->count, path, file_size / (1024.0 * 1024.0),
+            ds->count * sizeof(float) / (1024.0 * 1024.0));
 
     return 0;
 }
@@ -84,6 +105,8 @@ int dataset_load(const char *path, struct dataset *ds) {
 void dataset_free(struct dataset *ds) {
     if (ds && ds->_mem) {
         munmap(ds->_mem, ds->_mem_len);
+        free(ds->ref_norms);
+        ds->ref_norms = NULL;
         ds->entries = NULL;
         ds->count = 0;
         ds->_mem = NULL;

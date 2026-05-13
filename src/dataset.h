@@ -51,6 +51,7 @@ static inline float qdecode(uint8_t q, float dim_min, float dim_range) {
 struct dataset {
     struct quant_params params;
     struct reference *entries;
+    float *ref_norms;          /* pre-computed norm of each reference vector */
     size_t count;
     void *_mem;      /* mmap base */
     size_t _mem_len; /* size of mapped region */
