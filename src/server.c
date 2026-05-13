@@ -1,8 +1,17 @@
+/* ── Force h2o to use its internal evloop (not libuv) ── */
+#define H2O_USE_LIBUV 0
+
 #include "server.h"
 #include "routes.h"
+#include "dataset.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <h2o.h>
+#include <h2o/http1.h>
 
 /* ──────────────────────────────────────────────
  * Global dataset definition
@@ -11,107 +20,126 @@
 struct dataset g_dataset;
 
 /* ──────────────────────────────────────────────
- * Iteration tracking for POST body accumulation
+ * Global h2o objects (needed by accept callback)
  * ────────────────────────────────────────────── */
 
-static void accumulate_body(struct request_body *body,
-                             const char *data, size_t len) {
-    if (len == 0) return;
-    size_t needed = body->len + len + 1;
-    if (needed > body->cap) {
-        body->cap = needed + 4096;
-        char *p = (char *)realloc(body->data, body->cap);
-        if (p == NULL) return;
-        body->data = p;
+static h2o_globalconf_t config;
+static h2o_context_t ctx;
+static h2o_accept_ctx_t accept_ctx;
+
+/* ──────────────────────────────────────────────
+ * Accept callback — called when a new connection arrives
+ * ────────────────────────────────────────────── */
+
+static void on_accept(h2o_socket_t *listener, const char *err) {
+    h2o_socket_t *sock;
+
+    if (err != NULL) {
+        return;
     }
-    memcpy(body->data + body->len, data, len);
-    body->len += len;
-    body->data[body->len] = '\0';
+
+    if ((sock = h2o_evloop_socket_accept(listener)) == NULL)
+        return;
+    h2o_accept(&accept_ctx, sock);
 }
 
 /* ──────────────────────────────────────────────
- * Request dispatcher (called by MHD thread pool)
- *
- * MHD calls this handler multiple times per connection:
- *   1. First call (*con_cls == NULL): allocate state, return MHD_YES.
- *      Do NOT queue a response yet.
- *   2. Intermediate calls (*upload_data_size > 0): accumulate body.
- *   3. Final call (*upload_data_size == 0, *con_cls != NULL):
- *      dispatch route and queue response.
+ * Create the listening socket & register with the event loop
  * ────────────────────────────────────────────── */
 
-static enum MHD_Result request_handler(void *cls,
-                                        struct MHD_Connection *connection,
-                                        const char *url,
-                                        const char *method,
-                                        const char *version,
-                                        const char *upload_data,
-                                        size_t *upload_data_size,
-                                        void **con_cls) {
-    (void)cls;
-    (void)version;
+static int create_listener(unsigned short port) {
+    struct sockaddr_in addr;
+    int fd, reuseaddr_flag = 1;
+    h2o_socket_t *sock;
 
-    struct request_body *body = *con_cls;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port = htons(port);
 
-    if (body == NULL) {
-        /* First call: allocate state and wait for body data */
-        body = (struct request_body *)calloc(1, sizeof(*body));
-        if (body == NULL) return MHD_NO;
-        *con_cls = body;
-        return MHD_YES;
+    if ((fd = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
+        perror("socket");
+        return -1;
     }
 
-    if (*upload_data_size > 0) {
-        accumulate_body(body, upload_data, *upload_data_size);
-        *upload_data_size = 0;
-        return MHD_YES;
+    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuseaddr_flag,
+                   sizeof(reuseaddr_flag)) != 0) {
+        perror("setsockopt(SO_REUSEADDR)");
+        close(fd);
+        return -1;
     }
 
-    /* ── *upload_data_size == 0: body fully received, dispatch ── */
-
-    if (strcmp(method, "GET") == 0 && strcmp(url, "/ready") == 0) {
-        enum MHD_Result ret = handle_ready(connection);
-        free(body->data);
-        free(body);
-        *con_cls = NULL;
-        return ret;
+    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        perror("bind");
+        close(fd);
+        return -1;
     }
 
-    if (strcmp(method, "POST") == 0 && strcmp(url, "/fraud-score") == 0) {
-        enum MHD_Result ret = handle_fraud_score(connection, body);
-        free(body->data);
-        free(body);
-        *con_cls = NULL;
-        return ret;
+    if (listen(fd, SOMAXCONN) != 0) {
+        perror("listen");
+        close(fd);
+        return -1;
     }
 
-    {
-        enum MHD_Result ret = handle_not_found(connection);
-        free(body->data);
-        free(body);
-        *con_cls = NULL;
-        return ret;
-    }
+    sock = h2o_evloop_socket_create(ctx.loop, fd, H2O_SOCKET_FLAG_DONT_READ);
+    h2o_socket_read_start(sock, on_accept);
+
+    return 0;
 }
 
 /* ──────────────────────────────────────────────
- * Server lifecycle
+ * Helper: register a handler for a given path
  * ────────────────────────────────────────────── */
 
-struct MHD_Daemon *server_start(unsigned short port, int worker_count) {
-    return MHD_start_daemon(
-        MHD_USE_AUTO | MHD_USE_INTERNAL_POLLING_THREAD,
-        port,
-        NULL, NULL,
-        &request_handler, NULL,
-        MHD_OPTION_THREAD_POOL_SIZE, worker_count,
-        MHD_OPTION_CONNECTION_LIMIT, 10000,
-        MHD_OPTION_CONNECTION_TIMEOUT, 30,
-        MHD_OPTION_END);
+static h2o_pathconf_t *register_handler(h2o_hostconf_t *hostconf,
+                                        const char *path,
+                                        int (*on_req)(h2o_handler_t *,
+                                                       h2o_req_t *)) {
+    h2o_pathconf_t *pathconf = h2o_config_register_path(hostconf, path, 0);
+    h2o_handler_t *handler = h2o_create_handler(pathconf, sizeof(*handler));
+    handler->on_req = on_req;
+    return pathconf;
 }
 
-void server_stop(struct MHD_Daemon *daemon) {
-    if (daemon != NULL) {
-        MHD_stop_daemon(daemon);
+/* ──────────────────────────────────────────────
+ * Start the server — never returns
+ * ────────────────────────────────────────────── */
+
+int server_start(unsigned short port) {
+    h2o_hostconf_t *hostconf;
+
+    h2o_config_init(&config);
+    hostconf = h2o_config_register_host(
+        &config, h2o_iovec_init(H2O_STRLIT("default")), 65535);
+
+    /* Register route handlers */
+    register_handler(hostconf, "/ready", handle_ready);
+    register_handler(hostconf, "/fraud-score", handle_fraud_score);
+
+    /* Default handler for everything else (404) */
+    register_handler(hostconf, "/", handle_not_found);
+
+    /* Set max request entity size (allow reasonably large POST bodies) */
+    config.max_request_entity_size = 1024 * 1024;  /* 1 MB */
+
+    /* Initialize the h2o context with the evloop */
+    h2o_context_init(&ctx, h2o_evloop_create(), &config);
+
+    accept_ctx.ctx = &ctx;
+    accept_ctx.hosts = config.hosts;
+
+    if (create_listener(port) != 0) {
+        fprintf(stderr, "failed to listen on 0.0.0.0:%u: %s\n",
+                port, strerror(errno));
+        return -1;
     }
+
+    fprintf(stderr, "Listening on http://0.0.0.0:%u (h2o/evloop)\n", port);
+    fflush(stderr);
+
+    /* Run event loop until killed */
+    while (h2o_evloop_run(ctx.loop, INT32_MAX) == 0)
+        ;
+
+    return 0;
 }

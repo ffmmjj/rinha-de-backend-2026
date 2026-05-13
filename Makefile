@@ -1,4 +1,4 @@
-.PHONY: build run run-bg stop test clean data benchmark benchmark-h2o benchmark-mhd docker-build docker-run docker-stop docker-test
+.PHONY: build run run-bg stop test clean data benchmark docker-build docker-run docker-stop docker-test
 
 BUILD_DIR ?= cmake-build-debug
 CMAKE     ?= /Users/felipe/Applications/CLion.app/Contents/bin/cmake/mac/aarch64/bin/cmake
@@ -13,12 +13,6 @@ run:
 
 run-bg:
 	./$(BUILD_DIR)/rinha_de_backend &
-
-run-h2o:
-	./$(BUILD_DIR)/rinha_de_backend_h2o
-
-run-h2o-bg:
-	./$(BUILD_DIR)/rinha_de_backend_h2o &
 
 stop:
 	pkill -f "rinha_de_backend" 2>/dev/null; true
@@ -38,46 +32,19 @@ test: build
 	@echo ""
 	$(MAKE) stop
 
-test-h2o: build
-	@test -f resources/references.bin || $(MAKE) data
-	$(MAKE) stop
-	$(MAKE) run-h2o-bg
-	sleep 0.5
-	curl -s http://localhost:9999/ready
-	@echo ""
-	curl -s -X POST http://localhost:9999/fraud-score \
-		-H "Content-Type: application/json" \
-		-d '{"id":"tx-1","transaction":{"amount":100.50,"installments":1,"requested_at":"2026-05-11T12:00:00Z"},"customer":{"avg_amount":200.0,"tx_count_24h":5,"known_merchants":["m1"]},"merchant":{"id":"m1","mcc":"5411","avg_amount":120.0},"terminal":{"is_online":true,"card_present":false,"km_from_home":10.0}}'
-	@echo ""
-	curl -s http://localhost:9999/ || true
-	@echo ""
-	$(MAKE) stop
-
 # wrk has a bug where -s <file> performs poorly with POST body scripts.
 # Workaround: pipe the script through /dev/stdin.
 WRK_PAYLOAD = {"id":"tx-1","transaction":{"amount":100.50,"installments":1,"requested_at":"2026-05-11T12:00:00Z"},"customer":{"avg_amount":200.0,"tx_count_24h":5,"known_merchants":["m1"]},"merchant":{"id":"m1","mcc":"5411","avg_amount":120.0},"terminal":{"is_online":true,"card_present":false,"km_from_home":10.0}}
 
-benchmark-h2o: build
+benchmark: build
 	@test -f resources/references.bin || $(MAKE) data
 	$(MAKE) stop
-	$(MAKE) run-h2o-bg 2>/dev/null
+	$(MAKE) run-bg 2>/dev/null
 	sleep 0.5
 	@echo "=== h2o benchmark (10s, 10 connections) ==="
 	@printf 'wrk.method = "POST"\nwrk.body = '\''$(WRK_PAYLOAD)'\''\nwrk.headers["Content-Type"] = "application/json"\n' | \
 		wrk -t2 -c10 -d10s -s /dev/stdin http://localhost:9999/fraud-score
 	$(MAKE) stop
-
-benchmark-mhd: build
-	@test -f resources/references.bin || $(MAKE) data
-	$(MAKE) stop
-	$(MAKE) run-bg 2>/dev/null
-	sleep 0.5
-	@echo "=== MHD benchmark (10s, 10 connections) ==="
-	@printf 'wrk.method = "POST"\nwrk.body = '\''$(WRK_PAYLOAD)'\''\nwrk.headers["Content-Type"] = "application/json"\n' | \
-		wrk -t2 -c10 -d10s -s /dev/stdin http://localhost:9999/fraud-score
-	$(MAKE) stop
-
-benchmark: benchmark-h2o benchmark-mhd
 
 data:
 	python3 scripts/preprocess_references.py

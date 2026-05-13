@@ -1,29 +1,24 @@
 #ifndef ROUTES_H
 #define ROUTES_H
 
-#include <microhttpd.h>
+/* NOTE: h2o.h is NOT included here because server.c and routes.c
+ * both must #define H2O_USE_LIBUV 0 before including it. */
+
+/* Forward declarations for h2o types (incomplete) */
+typedef struct st_h2o_handler_t h2o_handler_t;
+typedef struct st_h2o_req_t h2o_req_t;
 
 /* ──────────────────────────────────────────────
- * Per-connection state for accumulating POST bodies
- * ────────────────────────────────────────────── */
-
-struct request_body {
-    char *data;
-    size_t len;
-    size_t cap;
-};
-
-/* ──────────────────────────────────────────────
- * Route handlers
+ * h2o route handlers
  *
- * Each returns MHD_YES on success, MHD_NO on error.
+ * Each returns 0 on success, -1 if the request
+ * should be passed to the next handler.
  * ────────────────────────────────────────────── */
 
-enum MHD_Result handle_ready(struct MHD_Connection *connection);
+int handle_ready(h2o_handler_t *self, h2o_req_t *req);
 
-enum MHD_Result handle_fraud_score(struct MHD_Connection *connection,
-                                    const struct request_body *body);
+int handle_fraud_score(h2o_handler_t *self, h2o_req_t *req);
 
-enum MHD_Result handle_not_found(struct MHD_Connection *connection);
+int handle_not_found(h2o_handler_t *self, h2o_req_t *req);
 
 #endif /* ROUTES_H */

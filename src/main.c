@@ -1,35 +1,31 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
-
+#include <signal.h>
 #include "server.h"
+#include "dataset.h"
 
 #define PORT 9999
-#define WORKER_COUNT 4
-
 #define DATASET_PATH "resources/references.bin"
 
+/* Global dataset (defined in server.c) */
+extern struct dataset g_dataset;
+
 int main(void) {
+    signal(SIGPIPE, SIG_IGN);
+
     if (dataset_load(DATASET_PATH, &g_dataset) != 0) {
         fprintf(stderr, "Failed to load dataset from %s\n", DATASET_PATH);
         return EXIT_FAILURE;
     }
 
-    struct MHD_Daemon *daemon = server_start(PORT, WORKER_COUNT);
-    if (daemon == NULL) {
-        fprintf(stderr, "Failed to start daemon on port %d\n", PORT);
+    if (server_start(PORT) != 0) {
+        fprintf(stderr, "Failed to start h2o server on port %d\n", PORT);
+        dataset_free(&g_dataset);
         return EXIT_FAILURE;
     }
 
-    fprintf(stderr, "Listening on http://0.0.0.0:%d (%d workers)\n",
-            PORT, WORKER_COUNT);
-
-    /* Run until killed */
-    for (;;) {
-        sleep(1);
-    }
-
-    server_stop(daemon);
+    /* h2o runs the event loop inside server_start() —
+     * it never returns until SIGINT/SIGTERM. */
     dataset_free(&g_dataset);
     return EXIT_SUCCESS;
 }

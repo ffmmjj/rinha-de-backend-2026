@@ -1,3 +1,6 @@
+/* h2o must use the internal evloop (not libuv) to match server.c */
+#define H2O_USE_LIBUV 0
+
 #include "routes.h"
 #include "transaction.h"
 #include "fraud.h"
@@ -5,41 +8,66 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <h2o.h>
 
 /* ──────────────────────────────────────────────
- * Reusable helper: queue a JSON response
+ * Global dataset (defined in server.c)
  * ────────────────────────────────────────────── */
 
-static enum MHD_Result respond_json(struct MHD_Connection *connection,
-                                     unsigned int status,
-                                     const char *body) {
-    struct MHD_Response *response =
-        MHD_create_response_from_buffer(strlen(body), (void *)body,
-                                         MHD_RESPMEM_PERSISTENT);
-    if (response == NULL) return MHD_NO;
+extern struct dataset g_dataset;
 
-    MHD_add_response_header(response, "Content-Type", "application/json");
-    const enum MHD_Result ret =
-        MHD_queue_response(connection, status, response);
-    MHD_destroy_response(response);
-    return ret;
+/* ──────────────────────────────────────────────
+ * Reusable helper: send a JSON response
+ *
+ * Note: body must live at least until the response
+ * is sent (we use h2o_send_inline which copies it).
+ * ────────────────────────────────────────────── */
+
+static void respond_json(h2o_req_t *req, int status, const char *body) {
+    req->res.status = status;
+    req->res.reason = status == 200 ? "OK"
+                     : status == 400 ? "Bad Request"
+                     : status == 404 ? "Not Found"
+                     : "Internal Server Error";
+    h2o_add_header(&req->pool, &req->res.headers, H2O_TOKEN_CONTENT_TYPE,
+                   NULL, H2O_STRLIT("application/json"));
+    h2o_send_inline(req, body, strlen(body));
 }
 
 /* ──────────────────────────────────────────────
- * Route handlers
+ * GET /ready
  * ────────────────────────────────────────────── */
 
-enum MHD_Result handle_ready(struct MHD_Connection *connection) {
-    return respond_json(connection, MHD_HTTP_OK, "{\"status\":\"ok\"}");
+int handle_ready(h2o_handler_t *self, h2o_req_t *req) {
+    (void)self;
+    if (!h2o_memis(req->method.base, req->method.len, H2O_STRLIT("GET")))
+        return -1;
+
+    respond_json(req, 200, "{\"status\":\"ok\"}");
+    return 0;
 }
 
-enum MHD_Result handle_fraud_score(struct MHD_Connection *connection,
-                                    const struct request_body *body) {
+/* ──────────────────────────────────────────────
+ * POST /fraud-score
+ *
+ * The POST body is in req->entity (h2o already
+ * buffered it for us via max_request_entity_size).
+ * ────────────────────────────────────────────── */
+
+int handle_fraud_score(h2o_handler_t *self, h2o_req_t *req) {
+    (void)self;
+    if (!h2o_memis(req->method.base, req->method.len, H2O_STRLIT("POST")))
+        return -1;
+
+    if (req->entity.base == NULL || req->entity.len == 0) {
+        respond_json(req, 400, "{\"error\":\"empty_body\"}");
+        return 0;
+    }
+
     struct transaction tx;
-
-    if (transaction_parse(body->data, body->len, &tx) != 0) {
-        return respond_json(connection, MHD_HTTP_BAD_REQUEST,
-                             "{\"error\":\"invalid_json\"}");
+    if (transaction_parse(req->entity.base, req->entity.len, &tx) != 0) {
+        respond_json(req, 400, "{\"error\":\"invalid_json\"}");
+        return 0;
     }
 
     fprintf(stderr, "--- Transaction ---\n");
@@ -86,15 +114,20 @@ enum MHD_Result handle_fraud_score(struct MHD_Connection *connection,
     transaction_free(&tx);
 
     if (is_fraud) {
-        return respond_json(connection, MHD_HTTP_OK,
-                             "{\"approved\":false,\"fraud_score\":1.0}");
+        respond_json(req, 200, "{\"approved\":false,\"fraud_score\":1.0}");
     } else {
-        return respond_json(connection, MHD_HTTP_OK,
-                             "{\"approved\":true,\"fraud_score\":0.0}");
+        respond_json(req, 200, "{\"approved\":true,\"fraud_score\":0.0}");
     }
+
+    return 0;
 }
 
-enum MHD_Result handle_not_found(struct MHD_Connection *connection) {
-    return respond_json(connection, MHD_HTTP_NOT_FOUND,
-                         "{\"error\":\"not_found\"}");
+/* ──────────────────────────────────────────────
+ * Catch-all: 404
+ * ────────────────────────────────────────────── */
+
+int handle_not_found(h2o_handler_t *self, h2o_req_t *req) {
+    (void)self;
+    respond_json(req, 404, "{\"error\":\"not_found\"}");
+    return 0;
 }

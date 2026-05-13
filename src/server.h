@@ -1,21 +1,16 @@
 #ifndef SERVER_H
 #define SERVER_H
 
-#include <microhttpd.h>
-#include "dataset.h"
-
 /* ──────────────────────────────────────────────
- * Dataset — global, populated on startup
+ * h2o-based server
+ *
+ * Starts an HTTP/1.1 server on the given port using
+ * h2o's event-loop and handler infrastructure.
+ *
+ * Blocks forever (event loop runs until killed).
+ * Returns 0 on success, -1 on failure.
  * ────────────────────────────────────────────── */
 
-extern struct dataset g_dataset;
-
-/* ──────────────────────────────────────────────
- * Server lifecycle
- * ────────────────────────────────────────────── */
-
-struct MHD_Daemon *server_start(unsigned short port, int worker_count);
-
-void server_stop(struct MHD_Daemon *daemon);
+int server_start(unsigned short port);
 
 #endif /* SERVER_H */
