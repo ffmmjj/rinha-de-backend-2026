@@ -5,7 +5,7 @@
 #include <float.h>
 
 /* ──────────────────────────────────────────────
- * Cosine similarity between a float query vector
+ * Dot product between a float query vector
  * and a quantized uint8 reference vector.
  *
  * The query vector may contain -1 sentinels for
@@ -14,12 +14,15 @@
  *
  * The reference vector is valid quantized data
  * (never has -1 sentinels).
+ *
+ * The query norm is passed in to avoid recomputing
+ * it for every comparison.
  * ────────────────────────────────────────────── */
 
-static float cosine_similarity_quantized(const float *query,
+static float cosine_similarity_quantized(const float *query, float query_norm,
                                           const uint8_t *ref,
                                           const struct quant_params *params) {
-    float dot = 0.0f, nq = 0.0f, nr = 0.0f;
+    float dot = 0.0f, nr = 0.0f;
 
     for (int i = 0; i < VECTOR_LEN; i++) {
         /* Skip dimensions with missing data in the query */
@@ -30,14 +33,13 @@ static float cosine_similarity_quantized(const float *query,
         float rv = qdecode(ref[i], params->mins[i], params->ranges[i]);
 
         dot += query[i] * rv;
-        nq += query[i] * query[i];
         nr += rv * rv;
     }
 
-    if (nq == 0.0f || nr == 0.0f)
+    if (query_norm == 0.0f || nr == 0.0f)
         return 0.0f;
 
-    return dot / (sqrtf(nq) * sqrtf(nr));
+    return dot / (query_norm * sqrtf(nr));
 }
 
 /* ──────────────────────────────────────────────
@@ -64,9 +66,18 @@ bool fraud_detect(const float vec[14]) {
         best_idx[i] = 0;
     }
 
+    /* Compute query norm once (dimensions with -1.0 are skipped) */
+    float query_norm = 0.0f;
+    for (int i = 0; i < VECTOR_LEN; i++) {
+        if (vec[i] == -1.0f)
+            continue;
+        query_norm += vec[i] * vec[i];
+    }
+    query_norm = query_norm > 0.0f ? sqrtf(query_norm) : 1.0f;
+
     /* Scan all entries */
     for (size_t i = 0; i < g_dataset.count; i++) {
-        float sim = cosine_similarity_quantized(vec,
+        float sim = cosine_similarity_quantized(vec, query_norm,
                                                  g_dataset.entries[i].qvector,
                                                  &g_dataset.params);
 
